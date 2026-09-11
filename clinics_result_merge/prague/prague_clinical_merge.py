@@ -65,7 +65,15 @@ imed_id = pd.read_csv(
 imed_edss = imed_id[["Patient ID", 'MSCourse1', 'Date MSCourse 1', 'MSCourse2',
        'Date MSCourse 2', 'MSCourse3', 'Date MSCourse 3', 'Birth Date', 'Gender']]
 
+# sex age from mr database
+mr_path = r"C:\Users\mri-admin\Všeobecná fakultní nemocnice v Praze\DATA\MrExams\ValuesWithHeader_T1_FLAIR_20260304.TXT"
 
+database = pd.read_csv(mr_path,
+                    sep="\t", header=0, encoding="cp1250", dtype=str
+                )
+database['session'] = pd.to_datetime(database['DatumVys'], format="%d.%m.%Y").dt.strftime('%Y%m%d').astype(int)
+database['subject'] = database['paciid'].astype(int)
+results = pd.merge(results, database[['subject', 'VekPriVys', 'PatSex', 'session']], on=["subject", 'session'])
 
 # Sloučit oba dataframy
 imed_visits['Patient ID'] = imed_visits['Patient ID'].astype(str)
@@ -78,7 +86,6 @@ imed_edss_phenotype[['phenotype_imed', 'phenotype_imed_date']] = imed_edss_pheno
     lambda row: pd.Series(get_ms_course_at_date(row, 'Visit Date')),
     axis=1
 )
-
 
 
 

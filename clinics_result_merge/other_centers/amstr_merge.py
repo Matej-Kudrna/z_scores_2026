@@ -31,12 +31,23 @@ results_phenotype = pd.merge_asof(
 print(results[['subject', 'session']])
 print(clinics_short.columns.tolist()[:10])
 
-results_phenotype.rename(columns={'pat_id': 'subject', 'current_ms': 'Phenotype', 'gender': 'Sex', 'age_march_2026': 'Age_years'}, inplace=True)
+results_phenotype.rename(columns={'pat_id': 'subject', 'current_ms': 'Phenotype',
+                                  'gender': 'Sex', 'age_march_2026': 'Age_years',
+                                  'edss': 'EDSS_total_score'}
+                         , inplace=True
+                         )
 
 
 results_phenotype["subject"] = 'AMSTR-' + results_phenotype["subject"].astype(str)
 
 print(results_phenotype['Phenotype'].value_counts())
+results_phenotype.drop(columns=['session_dt'], inplace=True)
 
+cleanup_map = {
+    'male': 'M',
+    'female': 'F'
+}
+results_phenotype['Sex'] = results_phenotype['Sex'].replace(cleanup_map)
+print(results_phenotype['Sex'].value_counts())
 
 results_phenotype.to_csv(r"E:\Project_DCE\5_Amsterdam\bids\derivatives\2026_06_23\results_clinics.csv", index=False)

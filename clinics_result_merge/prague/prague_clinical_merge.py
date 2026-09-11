@@ -44,7 +44,7 @@ sestry_imed_paciid.rename(columns={'paciid': 'subject', 'iMed_ID': 'Patient ID'}
 prg_results_merge = pd.merge(sestry_imed_paciid, results, how='inner', on='subject', indicator=True)
 
 # sessions to datetime for merge with edss and phenotype
-prg_results_merge['session'] = pd.to_datetime(prg_results_merge['session'], format='%Y%m%d')
+prg_results_merge['session_dt'] = pd.to_datetime(prg_results_merge['session'], format='%Y%m%d')
 
 print(sestry_ids.head(10))
 ## ------- get phenotype from ID table to every visit row in VI table, than merge on closest date with merge_pipeline_results
@@ -73,14 +73,18 @@ database = pd.read_csv(mr_path,
                 )
 database['session'] = pd.to_datetime(database['DatumVys'], format="%d.%m.%Y").dt.strftime('%Y%m%d').astype(int)
 database['subject'] = database['paciid'].astype(int)
-results = pd.merge(results, database[['subject', 'VekPriVys', 'PatSex', 'session']], on=["subject", 'session'])
+prg_results_merge_mr = pd.merge(prg_results_merge, database[['subject', 'VekPriVys', 'PatSex', 'session']], on=["subject", 'session'])
+prg_results_merge_mr.rename(columns={
+    'PatSex': 'Sex',
+    'VekPriVys': 'Age_years',
+}, inplace=True)
 
 # Sloučit oba dataframy
 imed_visits['Patient ID'] = imed_visits['Patient ID'].astype(str)
 imed_edss['Patient ID'] = imed_edss['Patient ID'].astype(str)
 
 imed_edss_phenotype = imed_visits.merge(imed_edss, on='Patient ID', how='left', indicator=True)
-
+imed_edss_phenotype = imed_edss_phenotype[imed_edss_phenotype['Patient ID'].astype(str).isin(prg_results_merge_mr['Patient ID'].astype(str))]
 # Přidat sloupec s aktivním kurzem v den navstevy
 imed_edss_phenotype[['phenotype_imed', 'phenotype_imed_date']] = imed_edss_phenotype.apply(
     lambda row: pd.Series(get_ms_course_at_date(row, 'Visit Date')),
@@ -90,17 +94,16 @@ imed_edss_phenotype[['phenotype_imed', 'phenotype_imed_date']] = imed_edss_pheno
 
 
 ##----- merge to get edss and phenotype in the time of MRI
-imed_edss_phenotype['session'] = pd.to_datetime(imed_edss_phenotype['Visit Date'], format='%d.%m.%Y')
+imed_edss_phenotype['session_dt'] = pd.to_datetime(imed_edss_phenotype['Visit Date'], format='%d.%m.%Y')
 imed_edss_phenotype['Birth Date'] = pd.to_datetime(imed_edss_phenotype['Birth Date'], format='%d.%m.%Y')
 
-prg_results_merge['Patient ID'] = prg_results_merge['Patient ID'].astype(str)
+prg_results_merge_mr['Patient ID'] = prg_results_merge_mr['Patient ID'].astype(str)
 imed_edss_phenotype['Patient ID'] = imed_edss_phenotype['Patient ID'].astype(str)
 
 ## redukce klinickych dat
 # clinics_clean = clinics[['subject', 'Sex', 'Date_of_birth', 'EDSS_total_score', 'Phenotype', 'Age_years']]
-imed_edss_phenotype_reduced = imed_edss_phenotype[['Patient ID', 'session', 'EDSS', 'phenotype_imed', 'phenotype_imed_date', 'Birth Date', 'Gender']]
+imed_edss_phenotype_reduced = imed_edss_phenotype[['Patient ID', 'session_dt', 'EDSS', 'phenotype_imed', 'phenotype_imed_date', 'Birth Date']]
 imed_edss_phenotype_reduced.rename(columns={
-    'Gender': 'Sex',
     'Birth Date': 'Date_of_birth',
     'EDSS': 'EDSS_total_score',
     'phenotype_imed': 'Phenotype'
@@ -117,24 +120,19 @@ cleanup_map = {
 }
 imed_edss_phenotype_reduced['Phenotype'] = imed_edss_phenotype_reduced['Phenotype'].replace(cleanup_map)
 
-print(imed_edss_phenotype_reduced['Sex'].value_counts())
-
-cleanup_map = {
-    'juvenile MS': 'RRMS',
-    'Control': 'HC'
-}
-imed_edss_phenotype_reduced['Sex'] = imed_edss_phenotype_reduced['Sex'].replace(cleanup_map)
 
 
 prg_results_merge_edss = pd.merge_asof(
-    prg_results_merge.sort_values('session'),  # seřazeno
-    imed_edss_phenotype_reduced.sort_values('session'),  # seřazeno
-    on='session',  # merguj na datum!
+    prg_results_merge_mr.sort_values('session_dt'),  # seřazeno
+    imed_edss_phenotype_reduced.sort_values('session_dt'),  # seřazeno
+    on='session_dt',  # merguj na datum!
     by='Patient ID',  # pro každého pacienta zvlášť
     direction='backward'  # vezmi poslední EDSS před datem
 )
 
 prg_results_merge_edss['subject'] = 'PRG-' + prg_results_merge_edss['subject'].astype(str)
+
+prg_results_merge_edss.drop(columns=['cohort_sestry', 'Patient ID', 'phenotype_imed_date', 'session_dt', '_merge'], inplace=True)
 
 prg_results_merge_edss.to_csv(r"E:\Project_DCE\DCE_PRG_NEW\bids\derivatives\2026_07_02\\prague_results_clinics.csv", index=False)
 

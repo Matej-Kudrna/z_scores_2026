@@ -447,7 +447,7 @@ class Processing:
     @log_execution_time
     def run_quant_regions(self, zscores_stats_in_mb_regions: ZscoresMBRegions):
         pkg_version = metadata.version("shs_acit_quant_regions")
-        if self.files["t2_zscores"] is not None:
+        if self.files["t1_zscores"] is not None:
             output_path = self.output_path.format(f"quant_regions_t1_v{pkg_version}")
             os.makedirs(output_path, exist_ok=True)
 
@@ -488,13 +488,14 @@ class Processing:
     @log_execution_time
     def run_tracts(self, wm_lesions_zscores: WMLesions_zscores):
         pkg_version = metadata.version("shs_acit_quant_wmtracts")
-        output_path = self.output_path.format(f"quant_wmtracts_t1_v{pkg_version}")
-        os.makedirs(output_path, exist_ok=True)
-        wm_lesions_zscores.compute_qvalues_in_tracts(
-            self.files["t1_zscores_wholebrain"],
-            self.files["lesion_map_in_sst"],
-            output_path=output_path,
-        )
+        if self.files["t1_zscores_wholebrain"] is not None:
+            output_path = self.output_path.format(f"quant_wmtracts_t1_v{pkg_version}")
+            os.makedirs(output_path, exist_ok=True)
+            wm_lesions_zscores.compute_qvalues_in_tracts(
+                self.files["t1_zscores_wholebrain"],
+                self.files["lesion_map_in_sst"],
+                output_path=output_path,
+            )
 
         if self.files["t2_zscores_wholebrain"] is not None:
             output_path_t2 = self.output_path.format(
@@ -601,11 +602,11 @@ def get_relax_map_type(prague_atlas: PragueAtlas, relax_map_type: str):
 
 
 def main():  # pylint: disable=missing-function-docstring
-    today = datetime.today().strftime("%Y_%m_%d")
-
+    # today = datetime.today().strftime("%Y_%m_%d")
+    today = '2026_07_02'
     # define paths
     bids_dir = r"E:\Project_DCE\DCE_PRG_NEW\bids_test_hc"  # TODO: change to actual path
-
+    bids_dir = r"E:\Project_DCE\DCE_PRG_NEW\bids"
     # for future put preprocess table to folder derivatives and then change following path
     # create derivatives path and folder
     derivatives_path = os.path.join(bids_dir, "derivatives", today)
@@ -648,10 +649,11 @@ def main():  # pylint: disable=missing-function-docstring
     zscores_stats_in_mb_regions = ZscoresMBRegions(logger=logger, threshold_value=2.0)
 
     subjects = [
-        item
-        for item in os.listdir(bids_dir)
+        item for item in os.listdir(bids_dir)
         if os.path.isdir(os.path.join(bids_dir, item)) and item.startswith("sub-")
     ]
+    subjects.sort()
+    # subjects = [ 'sub-144820', 'sub-145098', 'sub-145413', 'sub-145533', 'sub-146016', 'sub-146161']
     for subject in tqdm(subjects):
         sessions = [
             item
@@ -682,10 +684,10 @@ def main():  # pylint: disable=missing-function-docstring
                 proc.run_registration_flair_to_mp2rage()
                 proc.run_registration_lesion_map_to_mp2rage()
                 proc.run_registration_lesion_map_to_sst()
-                proc.run_concord()
-                proc.run_perilesional_rings()
-                proc.run_tracts(wm_lesions_zscores=wm_lesions_zscores)
-                proc.run_periventricular(perivent_zscores=perivent_zscores)
+                # proc.run_concord()
+                # proc.run_perilesional_rings()
+                # proc.run_tracts(wm_lesions_zscores=wm_lesions_zscores)
+                # proc.run_periventricular(perivent_zscores=perivent_zscores)
                 proc.run_quant_regions(
                     zscores_stats_in_mb_regions=zscores_stats_in_mb_regions
                 )

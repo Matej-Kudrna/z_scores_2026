@@ -358,6 +358,7 @@ class Processing:
 
         self.files["lesion_map_in_MP2RAGE"] = output_file if os.path.isfile(output_file) else None
 
+    @log_execution_time
     def run_registration_lesion_map_to_sst(self):
         output_path = self.output_path.format("registration_lesion_map_to_SST")
         output_file = os.path.join(output_path, "lesion_map_reg_to_sst.nii.gz")
@@ -386,26 +387,6 @@ class Processing:
 
         )
 
-    @log_execution_time
-    def run_registration_lesion_map_to_sst(self):
-        output_path = self.output_path.format("registration_lesion_map_to_SST")
-        output_file = os.path.join(output_path, "lesion_map_reg_to_sst.nii.gz")
-
-        if not self._done("registration_lesion_map_to_sst", output_file) \
-                and self._require("lesion_map_in_MP2RAGE", "tp_uni_to_sst"):
-            os.makedirs(output_path, exist_ok=True)
-            run_transformix(
-                moving=self.files["lesion_map_in_MP2RAGE"],
-                transform_param_file=self.files["tp_uni_to_sst"],
-                output_path=output_path,
-                output_filename="lesion_map_reg_to_sst.nii.gz",
-                param_to_modify={
-                    "FinalBSplineInterpolationOrder": (None, "0")
-                },  # nearest neighbour interpolation (lesion mask is binary)
-                save=True,
-            )
-
-        self.files["lesion_map_in_sst"] = output_file if os.path.isfile(output_file) else None
 
     @log_execution_time
     def run_wmh(self, phoenix_wmh: Phoenix):
@@ -708,13 +689,13 @@ def main():  # pylint: disable=missing-function-docstring
                 proc.run_registration_flair_to_mp2rage()
                 proc.run_registration_lesion_map_to_mp2rage()
                 proc.run_registration_lesion_map_to_sst()
-                proc.run_concord()
-                proc.run_perilesional_rings()
-                proc.run_tracts(wm_lesions_zscores=wm_lesions_zscores)
                 proc.run_periventricular(perivent_zscores=perivent_zscores)
                 proc.run_quant_regions(
                     zscores_stats_in_mb_regions=zscores_stats_in_mb_regions
                 )
+                proc.run_perilesional_rings()
+                proc.run_tracts(wm_lesions_zscores=wm_lesions_zscores)
+                proc.run_concord()
 
             except Exception as ex:
                 logger.critical(

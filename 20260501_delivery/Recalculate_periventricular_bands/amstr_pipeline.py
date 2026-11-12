@@ -684,13 +684,12 @@ def main():  # pylint: disable=missing-function-docstring
                 proc.run_registration_flair_to_mp2rage()
                 proc.run_registration_lesion_map_to_mp2rage()
                 proc.run_registration_lesion_map_to_sst()
-                proc.run_concord()
+
+                proc.run_periventricular(perivent_zscores=perivent_zscores)
+                proc.run_quant_regions(zscores_stats_in_mb_regions=zscores_stats_in_mb_regions)
                 proc.run_perilesional_rings()
                 proc.run_tracts(wm_lesions_zscores=wm_lesions_zscores)
-                proc.run_periventricular(perivent_zscores=perivent_zscores)
-                proc.run_quant_regions(
-                    zscores_stats_in_mb_regions=zscores_stats_in_mb_regions
-                )
+                proc.run_concord()
 
             except Exception as ex:
                 logger.critical(

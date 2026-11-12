@@ -19,7 +19,7 @@ from shs_acit_quant_perivent.compute_qval_in_perivent import Perivent_zscores
 from shs_acit_quant_regions.compute_qval_in_regions import ZscoresMBRegions
 from shs_acit_quant_wmtracts.compute_qval_in_wmtracts import WMLesions_zscores
 from shs_acit_registration.registration import run_elastix, run_transformix
-from shs_acit_utils.general import logger_h
+from shs_acit_utils.general import logger_h, ImageReorienterApp_sitk
 from shs_acit_wmh_phoenix.phoenix import Phoenix
 from shs_acit_t2overt1_atlas_loader.load_atlas import Atlas as AtlasT2overT1
 from shs_acit_t2overt1.compute_t2overt1_zscores import T2OverT1ZScore
@@ -93,19 +93,19 @@ class Processing:
     """
 
     def __init__(
-        self,
-        subject: str,
-        session: Optional[str],
-        data_path: str,
-        derivatives_path: str,
-        age: int,
-        sex: str,
-        logger: "logging.Logger",
-        file_dict: dict,
-        anat_subdir: bool = True,
-        uni_priority: Optional[list] = None,
-        allow_multiple: bool = False,
-        force: Optional[set] = None,
+            self,
+            subject: str,
+            session: Optional[str],
+            data_path: str,
+            derivatives_path: str,
+            age: int,
+            sex: str,
+            logger: "logging.Logger",
+            file_dict: dict,
+            anat_subdir: bool = True,
+            uni_priority: Optional[list] = None,
+            allow_multiple: bool = False,
+            force: Optional[set] = None,
     ):
         self.subject = subject
         self.session = session
@@ -270,20 +270,20 @@ class Processing:
         if (not label_files() or "morphobox" in self.force) and self._require("uni"):
             cmd_list = [
                 PATH_DL_MORPHO_EXE,
-                "--input_path",                   f"{self.files['uni']}",
-                "--out_dir",                      output_path,
-                "--volume_type",                  "mp2rage",
-                "--magnetic_field_strength",      "3",
-                "--mac_address",                  "04:7C:16:5D:B0:19",
-                "--patient_age",                  f"{self.patient_age}",
-                "--patient_sex",                  f"{self.patient_sex}",
-                "--compute_zscores",              "False",
+                "--input_path", f"{self.files['uni']}",
+                "--out_dir", output_path,
+                "--volume_type", "mp2rage",
+                "--magnetic_field_strength", "3",
+                "--mac_address", "04:7C:16:5D:B0:19",
+                "--patient_age", f"{self.patient_age}",
+                "--patient_sex", f"{self.patient_sex}",
+                "--compute_zscores", "False",
                 "--save_skull_stripping_outputs", "True",
-                "--save_outputs_to_disk",         "True",
-                "--save_zscore_maps",             "False",
-                "--save_dev_map",                 "False",
-                "--save_regional_T1_dev_map",     "False",
-                "--force_cpu",                    "True",
+                "--save_outputs_to_disk", "True",
+                "--save_zscore_maps", "False",
+                "--save_dev_map", "False",
+                "--save_regional_T1_dev_map", "False",
+                "--force_cpu", "True",
             ]
             result = subprocess.run(
                 cmd_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
@@ -357,6 +357,34 @@ class Processing:
             )
 
         self.files["lesion_map_in_MP2RAGE"] = output_file if os.path.isfile(output_file) else None
+
+    def run_registration_lesion_map_to_sst(self):
+        output_path = self.output_path.format("registration_lesion_map_to_SST")
+        output_file = os.path.join(output_path, "lesion_map_reg_to_sst.nii.gz")
+        if not os.path.isfile(output_file):
+            os.makedirs(output_path, exist_ok=True)
+            # ---- Update 2026.11.11 ----
+            lesion_map_in_mp2rage = sitk.ReadImage(self.files["lesion_map_in_MP2RAGE"])
+            lesion_map_in_mp2rage_reor, _ = ImageReorienterApp_sitk(lesion_map_in_mp2rage)
+            sitk.WriteImage(lesion_map_in_mp2rage_reor,
+                            os.path.join(output_path, "lesion_map_in_MP2RAGE_reoriented.nii.gz"))
+            self.files["lesion_map_in_MP2RAGE_reoriented"] = os.path.join(output_path,
+                                                                          'lesion_map_in_MP2RAGE_reoriented.nii.gz')
+            run_transformix(
+                moving=self.files["lesion_map_in_MP2RAGE_reoriented"],  # ---- Update 2026.11.11 ----
+                transform_param_file=self.files["tp_uni_to_sst"],
+                output_path=output_path,
+                output_filename="lesion_map_reg_to_sst.nii.gz",
+                param_to_modify={
+                    "FinalBSplineInterpolationOrder": (None, "0")
+                },  # nearest neighbour interpolation (lesion mask is binary)
+                save=True,
+            )
+        self.files["lesion_map_in_sst"] = (
+
+            output_file if os.path.isfile(output_file) else None
+
+        )
 
     @log_execution_time
     def run_registration_lesion_map_to_sst(self):
@@ -639,7 +667,7 @@ def main():  # pylint: disable=missing-function-docstring
                 item
                 for item in os.listdir(os.path.join(bids_dir, subject))
                 if os.path.isdir(os.path.join(bids_dir, subject, item))
-                and item.startswith("ses-")
+                   and item.startswith("ses-")
             ]
         else:
             sessions = [None]  # data jen ve struktuře sub-XXX

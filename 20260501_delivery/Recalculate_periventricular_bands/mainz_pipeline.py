@@ -24,6 +24,7 @@ from shs_acit_wmh_phoenix.phoenix import Phoenix
 from shs_acit_t2overt1_atlas_loader.load_atlas import Atlas as AtlasT2overT1
 from shs_acit_t2overt1.compute_t2overt1_zscores import T2OverT1ZScore
 from shs_acit_zscores.zscores_utils import ZScore  # 2026-05-26-UPDATE
+from shs_acit_zscores import voxelwise_zscores
 
 if TYPE_CHECKING:
     import logging
@@ -44,7 +45,7 @@ def get_version(package: str) -> str:
 
 
 VERSION_DL_MORPHOBOX = "1.2.7"
-PATH_DL_MORPHO_EXE = r"executables\shs_dl_morphometry.exe"
+PATH_DL_MORPHO_EXE = r"C:\Users\mri-admin\Documents\z_scores_2026\20260501_delivery\executables\shs_dl_morphometry.exe"
 
 # (label, mapa v MP2RAGE prostoru, mapa v SST, whole-brain mapa v SST)
 QMAPS = [
@@ -186,9 +187,9 @@ class Processing:
             return self._first(os.path.join(output_path, "**", f"*{out_key}*", fname))
 
         outputs = {
-            "t1_zscores_sst": from_lib("transformix_T1_template", "result.nii.gz"),
-            "t2_zscores_sst": from_lib("transformix_T2_template", "result.nii.gz"),
-            "t2overt1_zscores_sst": from_lib("transformix_T2OverT1_template", "T2OverT1map_sst.nii.gz"),
+            "t1_zscores_sst": os.path.join(voxelwise_zscores.output["zscores"], "T1_zscores_sst.nii.gz"),
+            "t2_zscores_sst": os.path.join(voxelwise_zscores.output["zscores"], "T2_zscores_sst.nii.gz"),
+            "t2overt1_zscores_sst": os.path.join(voxelwise_zscores.output["zscores"], "T2OverT1_zscores_sst.nii.gz"),
             "t1_zscores": os.path.join(output_path, "T1ZscoreMap_SC.nii.gz"),
             "t2_zscores": os.path.join(output_path, "T2ZscoreMap_SC.nii.gz"),
             "t2overt1_zscores": os.path.join(output_path, "T2OverT1ZscoreMap_SC.nii.gz"),
@@ -680,18 +681,18 @@ def main():  # pylint: disable=missing-function-docstring
                     proc.run_zscores(voxelwise_zscores=voxelwise_t1_zscores)
                 else:
                     proc.run_zscores(voxelwise_zscores=voxelwise_t2overt1_zscores)
+
                 proc.run_morphobox()
                 proc.run_wmh(phoenix_wmh=phoenix_wmh)
                 proc.run_registration_flair_to_mp2rage()
                 proc.run_registration_lesion_map_to_mp2rage()
                 proc.run_registration_lesion_map_to_sst()
-                # proc.run_concord()
+
+                proc.run_periventricular(perivent_zscores=perivent_zscores)
+                proc.run_quant_regions(zscores_stats_in_mb_regions=zscores_stats_in_mb_regions)
                 proc.run_perilesional_rings()
                 proc.run_tracts(wm_lesions_zscores=wm_lesions_zscores)
-                proc.run_periventricular(perivent_zscores=perivent_zscores)
-                proc.run_quant_regions(
-                    zscores_stats_in_mb_regions=zscores_stats_in_mb_regions
-                )
+                # proc.run_concord()
 
             except Exception as ex:
                 logger.critical(

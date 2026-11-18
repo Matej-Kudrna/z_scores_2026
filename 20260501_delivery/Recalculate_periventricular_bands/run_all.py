@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+import faulthandler, sys
 
 SCRIPTS = [
     # "prague_pipeline.py",
@@ -58,6 +59,7 @@ def run(script: str, log_dir: str) -> tuple[int, float]:
 
 
 def main():
+    faulthandler.enable(file=sys.stderr, all_threads=True)
     scripts = sys.argv[1:] or SCRIPTS
     log_dir = os.path.join(WORKDIR, "run_all_logs", datetime.now().strftime("%Y_%m_%d_%H%M"))
     os.makedirs(log_dir, exist_ok=True)

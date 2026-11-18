@@ -24,6 +24,7 @@ from shs_acit_wmh_phoenix.phoenix import Phoenix
 from shs_acit_t2overt1_atlas_loader.load_atlas import Atlas as AtlasT2overT1
 from shs_acit_t2overt1.compute_t2overt1_zscores import T2OverT1ZScore
 from shs_acit_zscores.zscores_utils import ZScore  # 2026-05-26-UPDATE
+from shs_acit_zscores import voxelwise_zscores
 
 if TYPE_CHECKING:
     import logging
@@ -44,7 +45,7 @@ def get_version(package: str) -> str:
 
 
 VERSION_DL_MORPHOBOX = "1.2.7"
-PATH_DL_MORPHO_EXE = r"executables\shs_dl_morphometry.exe"
+PATH_DL_MORPHO_EXE = r"C:\Users\mri-admin\Documents\z_scores_2026\20260501_delivery\executables\shs_dl_morphometry.exe"
 
 # (label, mapa v MP2RAGE prostoru, mapa v SST, whole-brain mapa v SST)
 QMAPS = [
@@ -186,9 +187,9 @@ class Processing:
             return self._first(os.path.join(output_path, "**", f"*{out_key}*", fname))
 
         outputs = {
-            "t1_zscores_sst": from_lib("transformix_T1_template", "result.nii.gz"),
-            "t2_zscores_sst": from_lib("transformix_T2_template", "result.nii.gz"),
-            "t2overt1_zscores_sst": from_lib("transformix_T2OverT1_template", "T2OverT1map_sst.nii.gz"),
+            "t1_zscores_sst": os.path.join(voxelwise_zscores.output["zscores"], "T1_zscores_sst.nii.gz"),
+            "t2_zscores_sst": os.path.join(voxelwise_zscores.output["zscores"], "T2_zscores_sst.nii.gz"),
+            "t2overt1_zscores_sst": os.path.join(voxelwise_zscores.output["zscores"], "T2OverT1_zscores_sst.nii.gz"),
             "t1_zscores": os.path.join(output_path, "T1ZscoreMap_SC.nii.gz"),
             "t2_zscores": os.path.join(output_path, "T2ZscoreMap_SC.nii.gz"),
             "t2overt1_zscores": os.path.join(output_path, "T2OverT1ZscoreMap_SC.nii.gz"),
@@ -362,30 +363,38 @@ class Processing:
     def run_registration_lesion_map_to_sst(self):
         output_path = self.output_path.format("registration_lesion_map_to_SST")
         output_file = os.path.join(output_path, "lesion_map_reg_to_sst.nii.gz")
+
         if not os.path.isfile(output_file):
+            lesion_in = self.files.get("lesion_map_in_MP2RAGE")
+            if not isinstance(lesion_in, (str, os.PathLike)) or not os.path.isfile(lesion_in):
+                self.logger.error(f"[REGISTRATION_LESION_MAP_TO_SST] lesion_map_in_MP2RAGE missing/invalid: {lesion_in!r}")
+                self.files["lesion_map_in_sst"] = None
+                return
+
+            tp = self.files.get("tp_uni_to_sst")
+            if not isinstance(tp, (str, os.PathLike)) or not os.path.isfile(tp):
+                self.logger.logger.error(f"[REGISTRATION_LESION_MAP_TO_SST] tp_uni_to_sst missing/invalid: {tp!r}")
+                self.files["lesion_map_in_sst"] = None
+                return
+
             os.makedirs(output_path, exist_ok=True)
             # ---- Update 2026.11.11 ----
-            lesion_map_in_mp2rage = sitk.ReadImage(self.files["lesion_map_in_MP2RAGE"])
+            lesion_map_in_mp2rage = sitk.ReadImage(str(lesion_in))
             lesion_map_in_mp2rage_reor, _ = ImageReorienterApp_sitk(lesion_map_in_mp2rage)
-            sitk.WriteImage(lesion_map_in_mp2rage_reor,
-                            os.path.join(output_path, "lesion_map_in_MP2RAGE_reoriented.nii.gz"))
-            self.files["lesion_map_in_MP2RAGE_reoriented"] = os.path.join(output_path,
-                                                                          'lesion_map_in_MP2RAGE_reoriented.nii.gz')
+            reor_path = os.path.join(output_path, "lesion_map_in_MP2RAGE_reoriented.nii.gz")
+            sitk.WriteImage(lesion_map_in_mp2rage_reor, reor_path)
+            self.files["lesion_map_in_MP2RAGE_reoriented"] = reor_path
+
             run_transformix(
-                moving=self.files["lesion_map_in_MP2RAGE_reoriented"],  # ---- Update 2026.11.11 ----
-                transform_param_file=self.files["tp_uni_to_sst"],
+                moving=reor_path,
+                transform_param_file=tp,
                 output_path=output_path,
                 output_filename="lesion_map_reg_to_sst.nii.gz",
-                param_to_modify={
-                    "FinalBSplineInterpolationOrder": (None, "0")
-                },  # nearest neighbour interpolation (lesion mask is binary)
+                param_to_modify={"FinalBSplineInterpolationOrder": (None, "0")},
                 save=True,
             )
-        self.files["lesion_map_in_sst"] = (
 
-            output_file if os.path.isfile(output_file) else None
-
-        )
+        self.files["lesion_map_in_sst"] = output_file if os.path.isfile(output_file) else None
 
 
     @log_execution_time
@@ -684,15 +693,15 @@ def main():  # pylint: disable=missing-function-docstring
                     proc.run_zscores(voxelwise_zscores=voxelwise_t1_zscores)
                 else:
                     proc.run_zscores(voxelwise_zscores=voxelwise_t2overt1_zscores)
+
                 proc.run_morphobox()
                 proc.run_wmh(phoenix_wmh=phoenix_wmh)
                 proc.run_registration_flair_to_mp2rage()
                 proc.run_registration_lesion_map_to_mp2rage()
                 proc.run_registration_lesion_map_to_sst()
+
                 proc.run_periventricular(perivent_zscores=perivent_zscores)
-                proc.run_quant_regions(
-                    zscores_stats_in_mb_regions=zscores_stats_in_mb_regions
-                )
+                proc.run_quant_regions(zscores_stats_in_mb_regions=zscores_stats_in_mb_regions)
                 proc.run_perilesional_rings()
                 proc.run_tracts(wm_lesions_zscores=wm_lesions_zscores)
                 proc.run_concord()

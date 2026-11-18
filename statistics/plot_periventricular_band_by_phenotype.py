@@ -1,22 +1,24 @@
-"""PDF report periventrikulárního gradientu (T1) rozděleného podle center.
+"""Periventricular gradient report (T1 map) - PDF, grouped by centre or phenotype.
 
-Použití: uprav nastavení v bloku `if __name__ == "__main__":` dole a spusť skript,
-nebo z jiného skriptu:
+Usage: edit the settings in the `if __name__ == "__main__":` block at the bottom and run
+the script, or call it from another script:
     from perivent_gradient_report import run_report
-    run_report("data.csv", centre_from_id="ID")
+    run_report("data.csv", group_from_id="ID", group_noun="centre")
+    run_report("data.csv", group_col="Phenotype", group_noun="phenotype")
 
-Vstup: tabulka ve wide formátu (1 řádek = 1 subjekt/sezení) se sloupci
-    map_perivent_<metrika>_t1_band_{1..48}_{lesions_in_band,
-    nasc_in_band, nawm_in_band, nawmsc_in_band, whole_band}
-a sloupcem s názvem centra.
+Input: wide table (one row = one subject/session) with columns
+    map_perivent_<metric>_t1_band_{1..48}_{lesions_in_band, nasc_in_band, nawm_in_band,
+                                           nawmsc_in_band, whole_band}
 
-Report obsahuje:
-  1. přehled: vstup, počty subjektů na centrum, přesné názvy použitých sloupců
-  2. souhrn – všechna centra v jednom grafu jen jako křivky (medián + pás IQR),
-     zvlášť absolutní objem a podíl z objemu pásu (in_band / whole_band × 100);
-     ke každému grafu tabulka medián [IQR] a Kruskal–Wallis mezi centry po pásech
-     s korekcí FDR (Benjamini–Hochberg)
-  3. oddíl pro každé centrum: boxploty po pásech + křivka mediánu a pás IQR
+The report contains
+  1. overview page: input, metric, inferred y-axis units, group sizes, exact column names,
+     and which bands were skipped (missing, empty, or identical in every row)
+  2. data plausibility check: subject-level T1 per group, subjects with values far
+     from the cohort (possible unit scaling or fitting problems); also saved as CSV
+  3. overview: all groups in one plot, median curve + IQR band only (no boxplots), with a
+     table of median [IQR] and a Kruskal-Wallis test between groups per band (BH-FDR)
+  4. one section per group: boxplots per band + median curve and IQR band
+Only informative bands and tissues are drawn.
 """
 from __future__ import annotations
 
@@ -34,32 +36,35 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
 from scipy.stats import kruskal
 
-METRIC = "volume_absolute_greater_2"   # přepíše run_report(metric=...)
-PREFIX = f"map_perivent_{METRIC}"
-METRIC_LABELS = {
-    "volume_absolute_greater_2": "objem nad prahem |x| > 2 (voxely)",
-    "relative_volume_absolute_greater_2": "podíl voxelů nad prahem |x| > 2",
-    "average": "průměr mapy v ROI",
-    "average_absolute": "průměr |mapy| v ROI",
-    "median": "medián mapy v ROI",
-    "median_absolute": "medián |mapy| v ROI",
-    "standard_deviation": "SD mapy v ROI",
-}
 MODALITY = "t1"
 N_BANDS = 48
 TISSUES = {
-    "lesions_in_band": "Léze v pásu",
-    "nawm_in_band": "NAWM v pásu",
-    "nawmsc_in_band": "NAWMSC v pásu",
-    "nasc_in_band": "NASC v pásu",
-    "whole_band": "Celý pás (whole_band)",
+    "nawmsc_in_band": "NAWMSC in band",
+    "nawm_in_band": "NAWM in band",
+    "nasc_in_band": "NASC in band",
+    "lesions_in_band": "Lesions in band",
+    "whole_band": "Whole band",
 }
-TABLE_BANDS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 40, 48]
-# Kategorická paleta v pevném pořadí (centrum má vždy stejnou barvu)
+METRICS = {
+    "median": "median of the map within the ROI",
+    "average": "mean of the map within the ROI",
+    "median_absolute": "median of |map| within the ROI",
+    "average_absolute": "mean of |map| within the ROI",
+    "standard_deviation": "standard deviation of the map within the ROI",
+    "volume_absolute_greater_2": "number of ROI voxels with |value| > 2",
+    "relative_volume_absolute_greater_2": "fraction of ROI voxels with |value| > 2",
+}
+STAT_NAME = {
+    "median": "Median", "average": "Mean", "median_absolute": "Median |value|",
+    "average_absolute": "Mean |value|", "standard_deviation": "Within-ROI SD",
+}
+# Plausible T1 at 3T (ms): WM ~700-1200, deep GM ~1100-1600, cortex ~1300-1900, CSF ~3500-4500
+T1_MS_MAX_PLAUSIBLE = 5000
+# Fixed-order categorical palette (a group keeps its colour throughout the report)
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4",
            "#008300", "#6250d6", "#e34948"]
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e1e0d9"
-CENTRE_CANDIDATES = ["centre", "center", "centrum", "site", "Centre", "Center", "Site"]
+A4 = (11.69, 8.27)
 
 plt.rcParams.update({
     "font.size": 9, "axes.edgecolor": "#c3c2b7", "axes.labelcolor": INK,
@@ -68,96 +73,85 @@ plt.rcParams.update({
 })
 
 
-def col_name(band: int, tissue: str, modality: str = MODALITY) -> str:
-    return f"{PREFIX}_{modality}_band_{band}_{tissue}"
+# --------------------------------------------------------------------------- helpers
+def col_name(metric: str, band: int, tissue: str) -> str:
+    return f"map_perivent_{metric}_{MODALITY}_band_{band}_{tissue}"
 
 
-def col_pattern(tissue: str, modality: str = MODALITY) -> str:
-    return f"{PREFIX}_{modality}_band_{{1..{N_BANDS}}}_{tissue}"
+def col_pattern(metric: str, tissue: str) -> str:
+    return f"map_perivent_{metric}_{MODALITY}_band_{{1..{N_BANDS}}}_{tissue}"
 
 
-# --------------------------------------------------------------------------- data
+def compress(bands: list[int]) -> str:
+    """[1,2,3,7] -> '1-3, 7'"""
+    out, start = [], None
+    bands = sorted(bands)
+    for i, b in enumerate(bands):
+        if start is None:
+            start = b
+        if i == len(bands) - 1 or bands[i + 1] != b + 1:
+            out.append(f"{start}" if start == b else f"{start}-{b}")
+            start = None
+    return ", ".join(out)
+
+
+def to_num(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(s):
+        return s.astype(float)
+    return pd.to_numeric(s.astype("string").str.replace(",", ".", regex=False), errors="coerce")
+
+
 def read_table(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in {".xlsx", ".xls"}:
         return pd.read_excel(path)
-    sep = ";" if path.read_text(errors="ignore").split("\n", 1)[0].count(";") > 0 else ","
-    return pd.read_csv(path, sep=sep)
+    with open(path, encoding="utf-8", errors="ignore") as f:
+        head = f.readline()
+    sep = max([",", ";", "\t"], key=head.count)
+    return pd.read_csv(path, sep=sep, low_memory=False)
 
 
-def find_centre_col(df: pd.DataFrame, given: str | None) -> str:
-    if given:
-        if given not in df.columns:
-            raise SystemExit(f"Sloupec centra '{given}' v datech není.")
-        return given
-    for c in CENTRE_CANDIDATES:
-        if c in df.columns:
-            return c
-    raise SystemExit("Nenašel jsem sloupec s centrem, zadej ho přes --centre-col.")
-
-
-def to_long(df: pd.DataFrame, centre_col: str) -> tuple[pd.DataFrame, dict]:
-    """Wide → long (row_id, centre, band, tissue, value); vrací i přehled sloupců."""
+# --------------------------------------------------------------------------- data
+def to_long(df: pd.DataFrame, group_col: str, metric: str) -> tuple[pd.DataFrame, dict]:
+    """Wide -> long (row_id, group, band, tissue, value), informative bands only."""
     found: dict[str, dict] = {}
     parts = []
     for tissue in TISSUES:
-        cols = {b: col_name(b, tissue) for b in range(1, N_BANDS + 1)}
+        cols = {b: col_name(metric, b, tissue) for b in range(1, N_BANDS + 1)}
         present = {b: c for b, c in cols.items() if c in df.columns}
-        empty = [b for b, c in present.items() if df[c].isna().all()]
-        if empty:
-            print(f"Pozn.: {tissue}: {len(empty)}/{len(present)} sloupců je úplně prázdných "
-                  f"(pásy {compress(empty)}).")
-        constant = [b for b, c in present.items() if b not in empty and df[c].nunique(dropna=True) <= 1]
-        found[tissue] = {"present": sorted(present), "missing": sorted(set(cols) - set(present)),
-                         "constant": constant, "empty": empty}
-        if constant and len(df) > 1:
-            print(f"VAROVÁNÍ: {tissue}: {len(constant)}/{len(present)} sloupců má u všech "
-                  f"řádků stejnou hodnotu (pásy {compress(constant)}) – zkontroluj vstupní data.")
+        vals = {b: to_num(df[c]) for b, c in present.items()}
+        empty = [b for b, v in vals.items() if v.isna().all()]
+        constant = [b for b, v in vals.items()
+                    if b not in empty and len(df) > 1 and v.nunique(dropna=True) <= 1]
         used = [b for b in present if b not in empty and b not in constant]
-        found[tissue]["used"] = used
+        found[tissue] = {"present": sorted(present), "missing": sorted(set(cols) - set(present)),
+                         "empty": empty, "constant": constant, "used": used}
+        if constant:
+            print(f"WARNING: {tissue}: {len(constant)}/{len(present)} columns have the same value "
+                  f"in every row (bands {compress(constant)}) - skipped, check the input data.")
         for b in used:
-            c = present[b]
             parts.append(pd.DataFrame({
-                "row_id": df.index, "centre": df[centre_col].astype("string"),
-                "band": b, "tissue": tissue,
-                "value": pd.to_numeric(df[c].astype(str).str.replace(",", "."), errors="coerce"),
+                "row_id": df.index, "group": df[group_col].astype("string"),
+                "band": b, "tissue": tissue, "value": vals[b],
             }))
     if not parts:
-        raise SystemExit(f"V datech nejsou žádné použitelné sloupce {PREFIX}_{MODALITY}_band_* "
-                         "(chybí, jsou prázdné nebo u všech řádků stejné).")
+        raise SystemExit(f"No usable map_perivent_{metric}_{MODALITY}_band_* columns "
+                         "(missing, empty, or identical in every row).")
     long = pd.concat(parts, ignore_index=True)
-    long = long[long.centre.notna()]
-    return long, found
+    return long[long.group.notna()], found
 
 
 def add_relative(long: pd.DataFrame) -> pd.DataFrame:
     whole = long[long.tissue == "whole_band"][["row_id", "band", "value"]].rename(
         columns={"value": "whole"})
-    rel = long[long.tissue != "whole_band"].merge(whole, on=["row_id", "band"], how="left")
+    rel = long[long.tissue != "whole_band"].merge(whole, on=["row_id", "band"], how="inner")
     rel["value"] = np.where(rel.whole > 0, 100 * rel.value / rel.whole, np.nan)
     return rel.drop(columns="whole")
 
 
 def band_stats(sub: pd.DataFrame) -> pd.DataFrame:
-    g = sub.dropna(subset=["value"]).groupby(["centre", "band"]).value
-    return pd.DataFrame({
-        "n": g.size(), "q1": g.quantile(.25), "median": g.median(), "q3": g.quantile(.75),
-    }).reset_index()
-
-
-def kruskal_by_band(sub: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for b, d in sub.dropna(subset=["value"]).groupby("band"):
-        groups = [g.values for _, g in d.groupby("centre").value if len(g) >= 3]
-        p = np.nan
-        if len(groups) >= 2 and np.ptp(np.concatenate(groups)) > 0:
-            try:
-                p = kruskal(*groups).pvalue
-            except ValueError:
-                p = np.nan
-        rows.append({"band": b, "p": p})
-    res = pd.DataFrame(rows)
-    res["q"] = bh_fdr(res.p.values)
-    return res
+    g = sub.dropna(subset=["value"]).groupby(["group", "band"]).value
+    return pd.DataFrame({"n": g.size(), "q1": g.quantile(.25), "median": g.median(),
+                         "q3": g.quantile(.75)}).reset_index()
 
 
 def bh_fdr(p: np.ndarray) -> np.ndarray:
@@ -175,126 +169,216 @@ def bh_fdr(p: np.ndarray) -> np.ndarray:
     return q
 
 
+def kruskal_by_band(sub: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for b, d in sub.dropna(subset=["value"]).groupby("band"):
+        samples = [g.to_numpy() for _, g in d.groupby("group").value if len(g) >= 3]
+        p = np.nan
+        if len(samples) >= 2 and np.ptp(np.concatenate(samples)) > 0:
+            try:
+                p = kruskal(*samples).pvalue
+            except ValueError:
+                p = np.nan
+        rows.append({"band": b, "p": p})
+    res = pd.DataFrame(rows, columns=["band", "p"])
+    res["q"] = bh_fdr(res.p.to_numpy())
+    return res
+
+
+# --------------------------------------------------------------------------- units
+def infer_axis(metric: str, values: pd.Series) -> tuple[str, str]:
+    """Infer the y-axis label from the metric and the bulk of the values.
+
+    Returns (axis label, one-line explanation of how it was inferred).
+    """
+    if metric == "volume_absolute_greater_2":
+        return ("Volume with |value| > 2 (voxels)",
+                "Voxel count of the ROI in the band (multiply by voxel volume for mm³). "
+                "Values of 10³-10⁴ are band sizes, not T1 times.")
+    if metric == "relative_volume_absolute_greater_2":
+        return "Fraction of ROI with |value| > 2", "Fraction between 0 and 1."
+    v = pd.Series(values, dtype=float).dropna()
+    stat = STAT_NAME.get(metric, metric)
+    if v.empty:
+        return stat, "No values."
+    med = float(v.median())
+    is_sd = metric == "standard_deviation"
+    if (v < 0).mean() > 0.05 and abs(med) < 10:
+        return f"{stat} (z-score)", (f"Negative values and bulk median {med:.2f}: "
+                                     "a normative z-score map, not a relaxation time.")
+    if (50 if is_sd else 200) <= med <= 6000:
+        return (f"{stat} of T1 relaxation time (ms)",
+                f"Bulk median {med:.0f}: T1 in milliseconds "
+                "(3T reference: WM ~700-1200 ms, deep GM ~1100-1600, cortex ~1300-1900, CSF ~4000).")
+    if (0.05 if is_sd else 0.2) <= med <= 6:
+        return (f"{stat} (T1 in s or R1 in 1/s - check)",
+                f"Bulk median {med:.2f}: T1 in seconds or R1 = 1/T1 in 1/s.")
+    return (f"{stat} (unknown units)",
+            f"Bulk median {med:.3g} does not match T1 in ms or s - check which map was used.")
+
+
+def plausibility(long: pd.DataFrame, metric: str, ids: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Subject-level typical value (median over bands of the most WM-like tissue).
+
+    Flags subjects at < 0.5x or > 2x the cohort median, or above 5000 ms anywhere.
+    """
+    for tissue in ("nawmsc_in_band", "nawm_in_band", "whole_band"):
+        d = long[long.tissue == tissue]
+        if d.value.notna().any():
+            break
+    subj = d.groupby(["row_id", "group"]).value.median().rename("typical").reset_index()
+    peak = long.groupby("row_id").value.max().rename("max_any")
+    subj = subj.join(peak, on="row_id")
+    subj.insert(0, "ID", ids.reindex(subj.row_id).to_numpy())
+    cohort = subj.typical.median()
+    subj["ratio_to_cohort"] = subj.typical / cohort
+    reasons = []
+    for _, r in subj.iterrows():
+        why = []
+        if r.ratio_to_cohort > 2:
+            why.append(f"{r.ratio_to_cohort:.1f}x cohort median")
+        elif r.ratio_to_cohort < 0.5:
+            why.append(f"{r.ratio_to_cohort:.2f}x cohort median")
+        if metric in ("median", "average", "median_absolute", "average_absolute") \
+                and cohort > 200 and r.max_any > T1_MS_MAX_PLAUSIBLE:
+            why.append(f"max {r.max_any:.0f} > {T1_MS_MAX_PLAUSIBLE} ms")
+        reasons.append("; ".join(why))
+    subj["flag"] = reasons
+    by_group = subj.groupby("group").agg(
+        n=("typical", "size"), median=("typical", "median"), min=("typical", "min"),
+        max=("typical", "max"), flagged=("flag", lambda s: int((s != "").sum())))
+    return subj, by_group, tissue
+
+
 # --------------------------------------------------------------------------- figures
-def _axes_common(fig, ax, title: str, subtitle: str, ylabel: str, columns_text: str, log: bool):
+def _axes_common(fig, ax, title, subtitle, ylabel, footer, log, bands):
     if log:
         ax.set_yscale("log")
-    ax.set_xlim(0.4, N_BANDS + 0.6)
-    ax.set_xticks([1, *range(4, N_BANDS + 1, 4)])
-    ax.set_xlabel("pás (band) – vzdálenost od komor →")
+    lo, hi = min(bands), max(bands)
+    ax.set_xlim(lo - 0.6, hi + 0.6)
+    ticks = [b for b in range(4, N_BANDS + 1, 4) if lo + 2 <= b <= hi - 2]
+    ax.set_xticks([lo, *ticks, hi] if hi != lo else [lo])
+    ax.set_xlabel("Band (distance from the ventricles →)")
     ax.set_ylabel(ylabel)
     ax.yaxis.grid(True, color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     fig.text(0.07, 0.945, title, fontsize=14, color=INK)
     fig.text(0.07, 0.915, textwrap.fill(subtitle, 150), fontsize=8.5, color=MUTED, va="top")
-    fig.text(0.07, 0.04, columns_text, fontsize=8, color=MUTED, family="monospace",
-             va="bottom")
+    fig.text(0.07, 0.04, footer, fontsize=8, color=MUTED, family="monospace", va="bottom")
 
 
-def overview_figure(sub: pd.DataFrame, centres: list[str], colors: dict, title: str,
-                    ylabel: str, columns_text: str, kw: pd.DataFrame, log: bool):
-    """Všechna centra přes sebe: jen křivka mediánu a pás IQR, bez boxplotů."""
-    fig = plt.figure(figsize=(11.69, 8.27))  # A4 na šířku
-    ax = fig.add_axes([0.07, 0.24, 0.9, 0.62])
-    stats = band_stats(sub if not log else sub[sub.value > 0])
-    for c in centres:
-        s = stats[stats.centre == c].sort_values("band")
+def overview_figure(sub, groups, colors, title, ylabel, footer, kw, log, noun_pl):
+    """All groups overlaid: median curve and IQR band only, no boxplots."""
+    fig = plt.figure(figsize=A4)
+    ax = fig.add_axes([0.08, 0.24, 0.89, 0.62])
+    stats = band_stats(sub[sub.value > 0] if log else sub)
+    for g in groups:
+        s = stats[stats.group == g].sort_values("band")
         if s.empty:
             continue
-        ax.fill_between(s.band, s.q1, s.q3, color=colors[c], alpha=0.14, linewidth=0)
-        ax.plot(s.band, s["median"], color=colors[c], linewidth=2, solid_capstyle="round",
-                solid_joinstyle="round", marker="o", markersize=2.5)
+        ax.fill_between(s.band, s.q1, s.q3, color=colors[g], alpha=0.14, linewidth=0)
+        ax.plot(s.band, s["median"], color=colors[g], linewidth=2, marker="o", markersize=2.5,
+                solid_capstyle="round", solid_joinstyle="round")
     if not log and not stats.empty:
-        ax.set_ylim(min(0, stats.q1.min()), stats.q3.max() * 1.08)
-    sig = kw[kw.q < 0.05].band.values if len(centres) > 1 else []
-    ymax = ax.get_ylim()[1]
-    for b in sig:
-        ax.text(b, ymax, "*", ha="center", va="bottom", fontsize=10, color=INK)
-    n_per = sub.dropna(subset=["value"]).groupby("centre").row_id.nunique()
-    handles = [Patch(facecolor=colors[c] + "33", edgecolor=colors[c],
-                     label=f"{c} (n = {n_per.get(c, 0)})") for c in centres]
-    ax.legend(handles=handles, loc="upper right", frameon=False, ncol=min(len(centres), 4))
+        lo = stats.q1.min()
+        ax.set_ylim(min(0, lo) if lo >= 0 else lo * 1.1, stats.q3.max() * 1.08)
+    if len(groups) > 1:
+        ymax = ax.get_ylim()[1]
+        for b in kw[kw.q < 0.05].band:
+            ax.text(b, ymax, "*", ha="center", va="bottom", fontsize=10, color=INK)
+    n_per = sub.dropna(subset=["value"]).groupby("group").row_id.nunique()
+    ax.legend(handles=[Patch(facecolor=colors[g] + "33", edgecolor=colors[g],
+                             label=f"{g} (n = {n_per.get(g, 0)})") for g in groups],
+              loc="best", frameon=False, ncol=min(len(groups), 4))
     _axes_common(fig, ax, title,
-                 "Všechna centra přes sebe: čára = medián, stínování = IQR (Q1–Q3). "
-                 "* = rozdíl mezi centry v daném pásu (Kruskal–Wallis, FDR q < 0,05).",
-                 ylabel, columns_text, log)
+                 f"All {noun_pl} overlaid: line = median, shading = IQR (Q1-Q3). "
+                 f"* = difference between {noun_pl} in that band (Kruskal-Wallis, BH-FDR q < 0.05).",
+                 ylabel, footer, log, sorted(sub.band.unique()))
     return fig
 
 
-def centre_figure(sub: pd.DataFrame, centre: str, color: str, title: str, ylabel: str,
-                  columns_text: str, log: bool, fliers: bool = False):
-    """Jedno centrum: boxplot v každém pásu + křivka mediánu a pás IQR."""
-    fig = plt.figure(figsize=(11.69, 8.27))
-    ax = fig.add_axes([0.07, 0.24, 0.9, 0.62])
-    d = sub[sub.centre == centre].dropna(subset=["value"])
+def group_figure(sub, group, color, title, ylabel, footer, log, fliers):
+    """One group: boxplot per band + median curve and IQR band."""
+    fig = plt.figure(figsize=A4)
+    ax = fig.add_axes([0.08, 0.24, 0.89, 0.62])
+    d = sub[sub.group == group].dropna(subset=["value"])
     if log:
         d = d[d.value > 0]
     bands = sorted(d.band.unique())
-    data = [d.loc[d.band == b, "value"].to_numpy() for b in bands]
-    if data:
-        bp = ax.boxplot(
-            data, positions=bands, widths=0.6, patch_artist=True, showfliers=fliers,
-            manage_ticks=False,
-            boxprops={"facecolor": color + "26", "edgecolor": color, "linewidth": 0.7},
-            medianprops={"color": color, "linewidth": 1},
-            whiskerprops={"color": color, "linewidth": 0.6},
-            capprops={"color": color, "linewidth": 0.6},
-            flierprops={"marker": ".", "markersize": 2, "markerfacecolor": color,
-                        "markeredgecolor": "none", "alpha": 0.5},
-        )
-        s = band_stats(d).sort_values("band")
-        ax.fill_between(s.band, s.q1, s.q3, color=color, alpha=0.12, linewidth=0)
-        ax.plot(s.band, s["median"], color=color, linewidth=2, solid_capstyle="round",
-                solid_joinstyle="round")
-        whisk = [v for w in bp["whiskers"] for v in w.get_ydata()]
-        if whisk and not fliers:
-            lo, hi = np.nanmin(whisk), np.nanmax(whisk)
-            ax.set_ylim((lo / 1.3, hi * 1.3) if log else (min(0, lo), hi * 1.06))
-    n = d.row_id.nunique()
+    bp = ax.boxplot(
+        [d.loc[d.band == b, "value"].to_numpy() for b in bands], positions=bands, widths=0.6,
+        patch_artist=True, showfliers=fliers, manage_ticks=False,
+        boxprops={"facecolor": color + "26", "edgecolor": color, "linewidth": 0.7},
+        medianprops={"color": color, "linewidth": 1},
+        whiskerprops={"color": color, "linewidth": 0.6},
+        capprops={"color": color, "linewidth": 0.6},
+        flierprops={"marker": ".", "markersize": 2, "markerfacecolor": color,
+                    "markeredgecolor": "none", "alpha": 0.5},
+    )
+    s = band_stats(d).sort_values("band")
+    ax.fill_between(s.band, s.q1, s.q3, color=color, alpha=0.12, linewidth=0)
+    ax.plot(s.band, s["median"], color=color, linewidth=2, solid_capstyle="round",
+            solid_joinstyle="round")
+    whisk = [v for w in bp["whiskers"] for v in w.get_ydata()]
+    if whisk and not fliers:
+        lo, hi = np.nanmin(whisk), np.nanmax(whisk)
+        ax.set_ylim((lo / 1.3, hi * 1.3) if log else (min(0, lo) if lo >= 0 else lo * 1.1, hi * 1.06))
     ax.legend(handles=[Patch(facecolor=color + "26", edgecolor=color,
-                             label=f"{centre} (n = {n})")],
-              loc="upper right", frameon=False)
+                             label=f"{group} (n = {d.row_id.nunique()})")],
+              loc="best", frameon=False)
     _axes_common(fig, ax, title,
-                 "Boxplot v každém pásu (whiskery 1,5×IQR); čára = medián, stínování = IQR."
-                 + ("" if fliers else " Odlehlé hodnoty nejsou zobrazeny."),
-                 ylabel, columns_text, log)
+                 "Boxplot per band (whiskers 1.5×IQR); line = median, shading = IQR."
+                 + ("" if fliers else " Outliers are not drawn (but are included in all statistics)."),
+                 ylabel, footer, log, bands)
     return fig
 
 
-def section_page(title: str, lines: list[str]):
-    fig = plt.figure(figsize=(11.69, 8.27))
+def text_page(title, lines, fontsize=8.5):
+    fig = plt.figure(figsize=A4)
+    fig.text(0.06, 0.93, title, fontsize=15, color=INK)
+    fig.text(0.06, 0.88, "\n".join(lines), fontsize=fontsize, color=INK, va="top",
+             family="monospace", linespacing=1.45)
+    return fig
+
+
+def section_page(title, lines):
+    fig = plt.figure(figsize=A4)
     fig.text(0.06, 0.55, title, fontsize=22, color=INK)
     fig.text(0.06, 0.49, "\n".join(lines), fontsize=10, color=MUTED, va="top", linespacing=1.6)
     return fig
 
 
-def text_page(lines: list[str], title: str):
-    fig = plt.figure(figsize=(11.69, 8.27))
-    fig.text(0.06, 0.93, title, fontsize=15, color=INK)
-    fig.text(0.06, 0.88, "\n".join(lines), fontsize=8.5, color=INK, va="top",
-             family="monospace", linespacing=1.45)
-    return fig
+def fmt_num(v: float) -> str:
+    if pd.isna(v):
+        return "-"
+    a = abs(v)
+    return f"{v:.0f}" if a >= 100 else f"{v:.1f}" if a >= 10 else f"{v:.2f}"
 
 
-def table_page(sub: pd.DataFrame, centres: list[str], title: str, unit: str, kw: pd.DataFrame,
-               columns_text: str):
+def table_page(sub, groups, title, ylabel, kw, footer, noun_pl):
     st = band_stats(sub)
-    rows, cell = [], []
-    for c in centres:
-        s = st[st.centre == c].set_index("band")
-        cell.append([fmt_cell(s, b) for b in TABLE_BANDS])
-        rows.append(c)
-    kwi = kw.set_index("band")
-    cell.append([fmt_p(kwi.q.get(b, np.nan)) for b in TABLE_BANDS])
+    used = sorted(sub.band.unique())
+    idx = np.unique(np.linspace(0, len(used) - 1, min(12, len(used))).round().astype(int))
+    bands = [used[i] for i in idx]
+    rows, cells = [], []
+    for g in groups:
+        s = st[st.group == g].set_index("band")
+        cells.append([f"{fmt_num(s.loc[b, 'median'])}\n[{fmt_num(s.loc[b, 'q1'])}-{fmt_num(s.loc[b, 'q3'])}]"
+                      f"\nn={int(s.loc[b, 'n'])}" if b in s.index else "-" for b in bands])
+        rows.append(g)
+    kwi = kw.set_index("band").q
+    cells.append(["-" if pd.isna(kwi.get(b)) else ("<0.001" if kwi[b] < 0.001 else f"{kwi[b]:.3f}")
+                  for b in bands])
     rows.append("KW q (FDR)")
-    fig = plt.figure(figsize=(11.69, 8.27))
+    fig = plt.figure(figsize=A4)
     fig.text(0.06, 0.93, title, fontsize=14, color=INK)
-    fig.text(0.06, 0.895, f"Medián [Q1–Q3] ({unit}); n = počet subjektů s hodnotou. "
-             "Poslední řádek: Kruskal–Wallis mezi centry, FDR (Benjamini–Hochberg) přes 48 pásů.",
-             fontsize=8.5, color=MUTED)
-    ax = fig.add_axes([0.06, 0.2, 0.9, 0.65])
+    fig.text(0.06, 0.895, textwrap.fill(
+        f"Median [Q1-Q3], n = subjects with a value. Units: {ylabel}. Last row: Kruskal-Wallis "
+        f"between {noun_pl}, Benjamini-Hochberg FDR across all drawn bands.", 150),
+        fontsize=8.5, color=MUTED, va="top")
+    ax = fig.add_axes([0.06, 0.2, 0.9, 0.64])
     ax.axis("off")
-    tb = ax.table(cellText=cell, rowLabels=rows, colLabels=[f"band {b}" for b in TABLE_BANDS],
+    tb = ax.table(cellText=cells, rowLabels=rows, colLabels=[f"band {b}" for b in bands],
                   loc="upper left", cellLoc="center")
     tb.auto_set_font_size(False)
     tb.set_fontsize(6.8)
@@ -303,194 +387,243 @@ def table_page(sub: pd.DataFrame, centres: list[str], title: str, unit: str, kw:
         c.set_edgecolor(GRID)
         if r == 0:
             c.set_text_props(color=MUTED)
-    fig.text(0.06, 0.04, columns_text, fontsize=8, color=MUTED, family="monospace",
-             va="bottom")
+    fig.text(0.06, 0.04, footer, fontsize=8, color=MUTED, family="monospace", va="bottom")
     return fig
 
 
-def fmt_cell(s: pd.DataFrame, b: int) -> str:
-    if b not in s.index:
-        return "–"
-    r = s.loc[b]
-    return f"{fmt_num(r['median'])}\n[{fmt_num(r.q1)}–{fmt_num(r.q3)}]\nn={int(r.n)}"
-
-
-def fmt_num(v: float) -> str:
-    if pd.isna(v):
-        return "–"
-    a = abs(v)
-    return f"{v:.0f}" if a >= 100 else f"{v:.1f}" if a >= 10 else f"{v:.2f}"
-
-
-def fmt_p(q: float) -> str:
-    return "–" if pd.isna(q) else ("<0.001" if q < 0.001 else f"{q:.3f}")
-
-
-# --------------------------------------------------------------------------- main
-def build_report(df: pd.DataFrame, out: Path, centre_col: str, log: bool,
-                 source_name: str, centre_order: list[str] | None = None,
-                 fliers: bool = False, centre_label: str | None = None) -> None:
-    long, found = to_long(df, centre_col)
-    centres = centre_order or sorted(long.centre.dropna().unique())
-    if len(centres) > len(PALETTE):
-        raise SystemExit(f"Víc než {len(PALETTE)} center – sluč menší centra do 'Other'.")
-    colors = {c: PALETTE[i] for i, c in enumerate(centres)}
-    is_volume = METRIC.startswith("volume")
+# --------------------------------------------------------------------------- report
+def build_report(df, out: Path, group_col: str, metric: str, source_name: str,
+                 group_label: str, ids: pd.Series, groups_order=None, log=False,
+                 fliers=False, noun="centre") -> None:
+    noun_pl = noun + "s"
+    long, found = to_long(df, group_col, metric)
+    groups = [g for g in (groups_order or sorted(long.group.unique())) if g in set(long.group)]
+    if len(groups) > len(PALETTE):
+        raise SystemExit(f"More than {len(PALETTE)} {noun_pl} - merge small groups or set the order list.")
+    colors = {g: PALETTE[i] for i, g in enumerate(groups)}
+    long = long[long.group.isin(groups)]
+    is_volume = metric.startswith("volume")
     rel = add_relative(long) if is_volume and found["whole_band"]["used"] else None
-    n_rows = long.groupby("centre").row_id.nunique()
+    n_rows = long.groupby("group").row_id.nunique()
+    ylabel, unit_note = infer_axis(metric, long.value)
+
+    variants = []  # (title, ylabel, data, footer)
+    for tissue, label in TISSUES.items():
+        if not found[tissue]["used"]:
+            continue
+        sub = long[long.tissue == tissue]
+        variants.append((label, ylabel, sub, f"Columns: {col_pattern(metric, tissue)}"))
+        if rel is not None and tissue != "whole_band":
+            r = rel[rel.tissue == tissue].dropna(subset=["value"])
+            if not r.empty and r.groupby("band").value.nunique().gt(1).any():
+                variants.append((f"{label} - % of band volume", "% of band volume", r,
+                                 f"Numerator:   {col_pattern(metric, tissue)}\n"
+                                 f"Denominator: {col_pattern(metric, 'whole_band')}"))
+    if not variants:
+        raise SystemExit("Nothing to plot - all columns are empty or identical in every row.")
 
     intro = [
-        f"Vstup:           {source_name}",
-        f"Vytvořeno:       {date.today().isoformat()}",
-        f"Mapa:            {MODALITY.upper()} (sloupce {PREFIX}_{MODALITY}_band_*)",
-        f"Metrika:         {METRIC} – {METRIC_LABELS.get(METRIC, METRIC)}",
-        f"Centrum:         {centre_label or centre_col}",
-        (f"Osa y:           {'logaritmická' if log else 'lineární'}"
-         f"{'' if fliers else '; u boxplotů oříznutá na rozsah whiskerů'}"),
+        f"Input:          {source_name}",
+        f"Created:        {date.today().isoformat()}",
+        f"Map:            {MODALITY.upper()}  (columns map_perivent_{metric}_{MODALITY}_band_*)",
+        f"Metric:         {metric} - {METRICS.get(metric, metric)}",
+        f"Y axis:         {ylabel}",
+        *textwrap.wrap(f"                {unit_note}", 130, subsequent_indent=" " * 16),
+        f"Grouping:       {group_label}",
+        (f"Scale:          {'log' if log else 'linear'}"
+         f"{'' if fliers else '; boxplot axes clipped to the whisker range'}"),
         "",
-        "Počet řádků (subjektů/sezení) na centrum:",
-        *[f"  {c:<20s} {n_rows.get(c, 0)}" for c in centres],
+        f"Rows (subjects/sessions) per {noun}:",
+        *[f"  {g:<22s} {n_rows.get(g, 0)}" for g in groups],
         "",
-        "Vykreslené tkáně (jen pásy, kde se hodnoty mezi subjekty liší):",
+        "Plotted tissues (only bands whose values differ between subjects):",
     ]
     skipped = []
     for tissue, label in TISSUES.items():
         f = found[tissue]
         if f["used"]:
-            intro.append(f"  {label:<24s} {col_pattern(tissue)}")
-            intro.append(f"  {'':<24s} pásy {compress(f['used'])}")
+            intro.append(f"  {label:<18s} {col_pattern(metric, tissue)}   bands {compress(f['used'])}")
         notes = [f"{what} {compress(f[k])}" for what, k in
-                 (("prázdné", "empty"), ("konstantní", "constant"), ("chybí", "missing")) if f[k]]
+                 (("empty", "empty"), ("identical in all rows", "constant"), ("missing", "missing"))
+                 if f[k]]
         if notes:
-            skipped.append(f"  {label:<24s} " + "; ".join(notes))
+            skipped.append(f"  {label:<18s} " + "; ".join(notes))
     if skipped:
-        intro += ["", "Vynechané pásy (bez informace – nekreslí se ani netestují):", *skipped]
+        intro += ["", "Skipped bands (no information - not plotted, not tested):", *skipped]
     intro += [
         "",
-        *(["Relativní grafy: 100 × <tkáň>_in_band / whole_band (stejný pás a subjekt)."] if rel is not None
-          else []),
-        "Chybějící a nečíselné hodnoty se vynechávají pro daný pás; desetinná čárka se převádí.",
-        "Statistika: Kruskal–Wallis mezi centry pro každý pás (centra s n ≥ 3),",
-        "korekce FDR Benjamini–Hochberg přes vykreslené pásy dané tkáně.",
+        "Abbreviations: NAWM = normal-appearing white matter. NASC and NAWMSC are ROI definitions",
+        "of the quant_perivent pipeline - see the pipeline documentation for their exact meaning.",
+        *(["% of band volume = 100 × <tissue>_in_band / whole_band (same band and subject)."]
+          if rel is not None else []),
+        "Missing and non-numeric values are dropped per band; decimal commas are converted.",
+        f"Statistics: Kruskal-Wallis between {noun_pl} per band ({noun_pl} with n ≥ 3),",
+        "Benjamini-Hochberg FDR across the drawn bands of each tissue.",
     ]
 
-    ylabel = METRIC_LABELS.get(METRIC, METRIC)
-    variants = []  # (tissue, nadpis, popisek osy y, data, popis sloupců)
-    for tissue, label in TISSUES.items():
-        if not found[tissue]["used"]:
-            continue
-        variants.append((tissue, f"{label} – absolutní objem" if is_volume else f"{label} – {ylabel}",
-                         ylabel, long[long.tissue == tissue], f"Sloupce: {col_pattern(tissue)}"))
-        if rel is not None and tissue != "whole_band":
-            r = rel[(rel.tissue == tissue)].dropna(subset=["value"])
-            if r.groupby("band").value.nunique().gt(1).any():
-                variants.append((tissue, f"{label} – podíl z objemu pásu", "% objemu pásu", r,
-                                 f"Čitatel:    {col_pattern(tissue)}\n"
-                                 f"Jmenovatel: {col_pattern('whole_band')}"))
-    if not variants:
-        raise SystemExit("Nic k vykreslení – všechny sloupce jsou prázdné nebo konstantní.")
-
+    flagged_csv = None
     with PdfPages(out) as pdf:
-        pdf.savefig(text_page(intro, f"Periventrikulární gradient – T1, {METRIC}, podle center"))
+        pdf.savefig(text_page(f"Periventricular gradient - T1 {metric}, by {noun}", intro))
         plt.close("all")
 
-        pdf.savefig(section_page("1  Souhrn – všechna centra", [
-            "Křivky mediánu a pásy IQR všech center v jednom grafu, bez boxplotů.",
-            f"Metrika: {METRIC} – {METRIC_LABELS.get(METRIC, METRIC)}",
-            "Za každým grafem tabulka medián [IQR] ve vybraných pásech a test mezi centry.",
-            "Centra: " + ", ".join(centres)]))
-        for _tissue, title, ylabel, sub, cols in variants:
+        if not is_volume:
+            subj, by_group, ref_tissue = plausibility(long, metric, ids)
+            flagged = subj[subj.flag != ""].sort_values("ratio_to_cohort", ascending=False)
+            lines = [
+                f"Subject-level value = median over bands of {TISSUES[ref_tissue]} ({metric}).",
+                f"Cohort median: {fmt_num(subj.typical.median())}   |   y-axis: {ylabel}",
+                "Flag: < 0.5× or > 2× cohort median (typical of a different unit or map type, e.g. 10× =",
+                "values stored in 0.1 ms), or any value above 5000 ms (beyond CSF T1 at 3T - fitting",
+                "failure, a non-T1 map, or a non-ms unit).",
+                "",
+                f"{noun.capitalize():<22s} {'n':>5s} {'median':>10s} {'min':>10s} {'max':>10s} {'flagged':>8s}",
+                *[f"{g:<22s} {int(r.n):>5d} {fmt_num(r['median']):>10s} {fmt_num(r['min']):>10s} "
+                  f"{fmt_num(r['max']):>10s} {int(r.flagged):>8d}"
+                  for g, r in by_group.reindex(groups).dropna(how="all").iterrows()],
+                "",
+                f"Flagged subjects: {len(flagged)}" + (" (first 25 shown; full list in CSV)"
+                                                         if len(flagged) > 25 else ""),
+                *[f"  {str(r.ID):<28s} {str(r.group):<14s} {fmt_num(r.typical):>9s}   {r.flag}"
+                  for _, r in flagged.head(25).iterrows()],
+            ]
+            pdf.savefig(text_page("Data plausibility check", lines))
+            plt.close("all")
+            if len(flagged):
+                flagged_csv = out.with_name(out.stem + "_flagged_subjects.csv")
+                flagged.drop(columns="row_id").to_csv(flagged_csv, index=False)
+            print(f"Plausibility: {len(flagged)} flagged subjects.")
+            if len(flagged):
+                print(by_group.to_string())
+
+        pdf.savefig(section_page(f"1  Overview - all {noun_pl}", [
+            f"Median curves and IQR bands of all {noun_pl} in one plot, no boxplots.",
+            f"Metric: {metric} - {METRICS.get(metric, metric)}; y axis: {ylabel}",
+            f"Each plot is followed by a table of median [IQR] and a test between {noun_pl}.",
+            f"{noun_pl.capitalize()}: " + ", ".join(groups)]))
+        for title, yl, sub, footer in variants:
             kw = kruskal_by_band(sub)
-            pdf.savefig(overview_figure(sub, centres, colors, f"{title} (T1) – všechna centra",
-                                        ylabel, cols, kw, log))
-            pdf.savefig(table_page(sub, centres, f"{title} (T1) – tabulka", ylabel, kw, cols))
+            pdf.savefig(overview_figure(sub, groups, colors, f"{title} - all {noun_pl}", yl,
+                                        footer, kw, log, noun_pl))
+            pdf.savefig(table_page(sub, groups, f"{title} - table", yl, kw, footer, noun_pl))
             plt.close("all")
 
-        for i, c in enumerate(centres, start=2):
-            pdf.savefig(section_page(f"{i}  Centrum {c}", [
-                f"Počet řádků (subjektů/sezení): {n_rows.get(c, 0)}",
-                "Boxploty po pásech s křivkou mediánu a pásem IQR."]))
-            for _tissue, title, ylabel, sub, cols in variants:
-                if sub[(sub.centre == c)].value.notna().sum() == 0:
+        for i, g in enumerate(groups, start=2):
+            pdf.savefig(section_page(f"{i}  {noun.capitalize()} {g}", [
+                f"Rows (subjects/sessions): {n_rows.get(g, 0)}",
+                "Boxplots per band with median curve and IQR band."]))
+            for title, yl, sub, footer in variants:
+                if sub[sub.group == g].value.notna().sum() == 0:
                     continue
-                pdf.savefig(centre_figure(sub, c, colors[c], f"{c}: {title} (T1)", ylabel,
-                                          cols, log, fliers))
+                pdf.savefig(group_figure(sub, g, colors[g], f"{g}: {title}", yl, footer, log, fliers))
                 plt.close("all")
-        meta = pdf.infodict()
-        meta["Title"] = "Periventricular gradient T1 by centre"
-
-
-def compress(bands: list[int]) -> str:
-    out, start = [], None
-    for i, b in enumerate(bands):
-        if start is None:
-            start = b
-        if i == len(bands) - 1 or bands[i + 1] != b + 1:
-            out.append(f"{start}" if start == b else f"{start}–{b}")
-            start = None
-    return ", ".join(out)
+        pdf.infodict()["Title"] = f"Periventricular gradient T1 {metric} by {noun}"
+    if flagged_csv:
+        print(f"Flagged subjects saved: {flagged_csv}")
 
 
 def run_report(
     input_path: str | Path,
     output_path: str | Path | None = None,
-    centre_col: str | None = None,
-    centre_from_id: str | None = None,
-    centres: list[str] | None = None,
+    *,
+    group_col: str | None = None,
+    group_from_id: str | None = None,
+    group_map: dict[str, str] | None = None,
+    na_label: str | None = None,
+    groups: list[str] | None = None,
+    group_noun: str = "centre",
+    metric: str = "median",
     log: bool = False,
     fliers: bool = False,
-    metric: str = "median",
 ) -> Path:
-    """Vytvoří PDF report. Volatelné přímo z Pythonu (skript, notebook).
+    """Build the PDF report. Callable directly from Python.
 
-    input_path      CSV nebo XLSX ve wide formátu
-    output_path     výstupní PDF; None = vedle vstupu jako <název>_perivent_T1_report.pdf
-    centre_col      sloupec s centrem (None = autodetekce centre/center/centrum/site)
-    centre_from_id  sloupec s ID; centrum = znaky před první '-' (např. 'PRG-001' → 'PRG')
-    centres         pořadí center = pořadí barev, např. ['PRG', 'CPH']; None = abecedně
-    log             logaritmická osa y
-    fliers          zobrazit v boxplotech odlehlé hodnoty
-    metric          která metrika z perivent tabulky: median, average, median_absolute,
-                    average_absolute, standard_deviation, volume_absolute_greater_2,
-                    relative_volume_absolute_greater_2
+    input_path     CSV or XLSX in wide format
+    output_path    output PDF; None = next to the input as <name>_perivent_T1_<metric>_by_<noun>.pdf
+    group_col      column holding the group (e.g. 'Phenotype', 'centre')
+    group_from_id  alternative: column with IDs; group = characters before the first '-'
+                   ('PRG-0012' -> 'PRG')
+    group_map      merge/rename groups, e.g. {'EarlyMS_dmt': 'EarlyMS'}
+    na_label       name for rows with a missing group (e.g. 'pseudo_HC'); None = drop those rows
+    groups         order of groups = order of colours; groups not listed are dropped; None = alphabetical
+    group_noun     word used in the report ('centre', 'phenotype')
+    metric         median | average | standard_deviation | median_absolute | average_absolute |
+                   volume_absolute_greater_2 | relative_volume_absolute_greater_2
+    log            log y axis
+    fliers         draw outliers in the boxplots
     """
-    global METRIC, PREFIX
-    METRIC, PREFIX = metric, f"map_perivent_{metric}"
+    if metric not in METRICS:
+        raise SystemExit(f"Unknown metric '{metric}'. Use one of: {', '.join(METRICS)}")
     input_path = Path(input_path)
-    output_path = (Path(output_path) if output_path else
-                   input_path.with_name(f"{input_path.stem}_perivent_T1_{metric}_report.pdf"))
-    df = read_table(input_path)
-    label = None
-    if centre_from_id:
-        if centre_from_id not in df.columns:
-            raise SystemExit(f"Sloupec '{centre_from_id}' v datech není. "
-                             f"Dostupné: {', '.join(map(str, df.columns[:10]))}…")
-        ids = df[centre_from_id].astype("string").str.strip()
+    output_path = (Path(output_path) if output_path else input_path.with_name(
+        f"{input_path.stem}_perivent_T1_{metric}_by_{group_noun}.pdf"))
+    df = read_table(input_path).copy()
+
+    if group_from_id:
+        if group_from_id not in df.columns:
+            raise SystemExit(f"Column '{group_from_id}' not found. First columns: "
+                             f"{', '.join(map(str, df.columns[:10]))}")
+        ids = df[group_from_id].astype("string").str.strip()
         no_dash = ids.notna() & ~ids.str.contains("-", regex=False)
         if no_dash.any():
-            print(f"Varování: {int(no_dash.sum())} ID bez '-' (např. {ids[no_dash].iloc[0]}),"
-                  " tyto řádky nemají centrum a vynechají se.")
-        df = df.copy()
-        df["_centre"] = ids.where(~no_dash).str.split("-", n=1).str[0].str.strip()
-        centre_col = "_centre"
-        label = f"znaky před '-' ve sloupci {centre_from_id}"
+            print(f"Note: {int(no_dash.sum())} IDs without '-' (e.g. {ids[no_dash].iloc[0]}) have no group.")
+        raw = ids.where(~no_dash).str.split("-", n=1).str[0].str.strip()
+        label = f"characters before '-' in column {group_from_id}"
+    elif group_col:
+        if group_col not in df.columns:
+            similar = [c for c in df.columns if group_col.lower()[:5] in str(c).lower()]
+            raise SystemExit(f"Column '{group_col}' not found." + (f" Similar: {similar}" if similar else ""))
+        raw = df[group_col].astype("string").str.strip()
+        label = f"column {group_col}"
     else:
-        centre_col = find_centre_col(df, centre_col)
-    print("Centra:", df[centre_col].value_counts(dropna=False).to_dict())
-    build_report(df, output_path, centre_col, log, input_path.name, centres, fliers, label)
-    print(f"Hotovo: {output_path}")
+        raise SystemExit("Set group_col or group_from_id.")
+
+    raw = raw.replace({"": pd.NA, "NA": pd.NA, "nan": pd.NA, "NaN": pd.NA, "None": pd.NA})
+    grp = raw.replace(group_map or {})
+    if na_label is not None:
+        grp = grp.fillna(na_label)
+    if groups:
+        grp = grp.where(grp.isin(groups))
+    df["_group"] = grp
+    if group_map:
+        label += "; merged: " + ", ".join(f"{k} → {v}" for k, v in group_map.items())
+    if na_label is not None:
+        label += f"; missing → {na_label}"
+    if group_map or na_label is not None:
+        print("Group mapping (original → used):")
+        print(pd.crosstab(raw.fillna("<NA>"), grp.fillna("<dropped>")).to_string())
+    n_drop = int(grp.isna().sum())
+    if n_drop:
+        print(f"Note: {n_drop} rows without a group are dropped.")
+    print(f"{group_noun.capitalize()}s:", grp.value_counts().to_dict())
+
+    if "ID" in df.columns:
+        ids_out = df["ID"].astype(str)
+    elif {"subject", "session"} <= set(df.columns):
+        ids_out = df["subject"].astype(str) + "_" + df["session"].astype(str)
+    else:
+        ids_out = pd.Series(df.index.astype(str), index=df.index)
+
+    build_report(df, output_path, "_group", metric, input_path.name, label, ids_out,
+                 groups, log, fliers, group_noun)
+    print(f"Done: {output_path}")
     return output_path
 
 
 if __name__ == "__main__":
-    # ---- nastavení ----------------------------------------------------------
-    INPUT = r"E:\Project_DCE\DATA_for_merge\combine_results_from_centers_20261030_1508.csv"
-    OUTPUT = None            # None = vedle CSV jako <název>_perivent_T1_<metrika>_report.pdf
-    METRIC_NAME = "standard_deviation"   # median | average | median_absolute | standard_deviation | volume_absolute_greater_2 ...
-    CENTRE_FROM_ID = "Phenotype"    # centrum = znaky před '-' ve sloupci ID
-    CENTRES = None           # pořadí/barvy center, např. ["PRG", "CPH", "LAU"]
-    LOG = False              # True = logaritmická osa y
-    FLIERS = False           # True = zobrazit odlehlé hodnoty
+    # ---- settings -----------------------------------------------------------
+    INPUT = r"E:\Project_DCE\_DATA_for_merge\combine_results_from_centers_20261116_1212.csv"
+    OUTPUT = None               # None = next to the CSV as <name>_perivent_T1_<metric>_by_phenotype.pdf
+    PHENOTYPE_COL = "Phenotype"
+    PHENOTYPE_MAP = {           # merge phenotypes before the analysis
+        "EarlyMS_no_dmt": "EarlyMS",
+        "EarlyMS_dmt": "EarlyMS",
+    }
+    NA_LABEL = "pseudo_HC"      # rows with missing phenotype; None = drop them
+    PHENOTYPES = None           # order/colours, e.g. ["pseudo_HC", "EarlyMS", ...]; None = alphabetical
+    METRIC = "median"           # median | average | standard_deviation | volume_absolute_greater_2 ...
+    LOG = False                 # True = log y axis
+    FLIERS = False              # True = draw outliers in boxplots
     # ------------------------------------------------------------------------
-    run_report(INPUT, OUTPUT, centre_from_id=CENTRE_FROM_ID, centres=CENTRES,
-               log=LOG, fliers=FLIERS, metric=METRIC_NAME)
+    run_report(INPUT, OUTPUT, group_col=PHENOTYPE_COL, group_map=PHENOTYPE_MAP,
+               na_label=NA_LABEL, groups=PHENOTYPES, group_noun="Phenotype_coarse",
+               metric=METRIC, log=LOG, fliers=FLIERS)
